@@ -1,0 +1,253 @@
+=======
+author: "Matty Klassen, Parsa Moheban, Michelle Kojekine"
+date: "04/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggbiplot)
+```
+
+#### Importing the datasets and renaming the columns and the rows 
+```{r}
+clinical.dataset <- read.table("data_clinical_patient.txt", sep="\t", header = FALSE) # Initializing the datasets 
+mutation.dataset <- read.table("data_mutations_extended.txt", sep="\t", header = FALSE)
+RNAseq <- read.csv("RNAseq.csv", sep = ",", header = FALSE)
+
+# 
+names(clinical.dataset) <- clinical.dataset[1,] # Renaming the Columns
+clinical.dataset <- clinical.dataset[-1,] # Removing the row associated with the column names  
+
+# Renaming all of the rows
+rownames(RNAseq) <- RNAseq[,1]
+RNAseq <- RNAseq[,-1]
+
+# Renaming all of the columns
+names(RNAseq) <- RNAseq[1,]
+RNAseq <- RNAseq[-1,]
+
+# New data set for further modification
+newRNA <- RNAseq
+colnames(newRNA) <- substr(colnames(newRNA), 1,12)
+newRNA <- newRNA[,colnames(newRNA)[!duplicated(colnames(newRNA))]] # Removing all duplicate patients from the new RNA file. 
+newRNA <- newRNA[,(colnames(newRNA) %in% clinical.dataset$PATIENT_ID[!duplicated(clinical.dataset$PATIENT_ID)])] # Created a new RNA sequence matrix with no duplicates from the clinical dataset
+clinical.dataset2 <- clinical.dataset[(clinical.dataset$PATIENT_ID %in%  colnames(newRNA)),] # Created a new data set that has the same patients as the new RNA set
+
+newRNA = as.matrix(sapply(newRNA[1:nrow(newRNA), 1:ncol(newRNA)], as.numeric)) # Makig the data set a matrix 
+rownames(newRNA) <- rownames(RNAseq) # Renaming the rows to be the same as the initial data set 
+
+# Transposing the matrix in order to have the patients in the rows.
+tRNA = as.data.frame(t(newRNA)) # Creating a data frame of the transposed matrix 
+colnames(tRNA) <- rownames(newRNA) # renaming the columns in tRNA as the rows from the initial data frame RNAseq
+tRNA = tRNA[, which(apply(tRNA, 2, var) !=0)] # Need to remove all columns with a variance of 0
+```
+New Transposed matrix for PCA analysis 
+
+#### Conducting a survival analysis for hypothesis testing.
+```{r}
+library(survival)
+
+relatClinicData = clinical.dataset2[,c(1, 20, 31, 32)]
+summary(relatClinicData)
+
+#Isolate the M0,M1 patients 
+relatClinicData = relatClinicData[relatClinicData$PATH_M_STAGE == "M0"|relatClinicData$PATH_M_STAGE =="M1",]
+
+#Converting the months from character to numeric for plotting
+relatClinicData$OS_MONTHS = as.numeric(relatClinicData$OS_MONTHS) 
+
+
+relatClinicData$OS_STATUS[relatClinicData$OS_STATUS == "0:LIVING"] <- 0
+relatClinicData$OS_STATUS[relatClinicData$OS_STATUS == "1:DECEASED"] <- 1
+
+#Converting the status from character to numeric for plotting
+relatClinicData$OS_STATUS = as.numeric(relatClinicData$OS_STATUS)
+
+# Kaplan-Meier Survival Curve
+km_fit <- survfit(Surv(OS_MONTHS, OS_STATUS) ~ PATH_M_STAGE, data=relatClinicData) # statistical data 
+plot(km_fit, xlab="Months", ylab = "Proportion Alive", main = 'Kaplan Meyer Plot', col = c("red", "purple"), lty = c(1:2)) #plot of surviving rate against M stage
+legend(118, 1, c("M0", "M1"), col = c("red", "purple"), lty = c(1:2)) #the legend of the graph 
+
+```
+As predicted, a patient with a non-metastatic tumor has a much higher survivability probability compared to that of a patient with distant metastasis 
+
+
+#### PCA analyis 
+```{r}
+# Conducting a PCA of the transposed matrix 
+pca.clinical <- prcomp(tRNA[, c(1:as.numeric(ncol(tRNA)))], center = TRUE, scale = TRUE)
+summary(pca.clinical)
+```
+
+#### 90% of the signifiacant PCs
+```{r}
+# Attempting to find the 90% most significant PCs 
+amountOfPCs = 0
+pcSum = 0
+
+for(i in pca.clinical$sdev ) {
+  if(i + pcSum > 0.9*sum(pca.clinical$sdev) ) {
+    pcSum = pcSum + i
+    amountOfPCs = amountOfPCs + 1
+    break
+  }
+  pcSum = pcSum + i
+  amountOfPCs = amountOfPCs + 1
+}
+
+amountOfPCs
+```
+There are far too many PCs in order to complete a more effective assessment.
+
+#### Creating a matrix of top 20 PCs with the patients tumour status, M stage, N stage, and OS status. For Logistic Regression.
+```{r}
+componentMatrix <- cbind( clinical.dataset2$PATH_M_STAGE, clinical.dataset2$PATH_N_STAGE, clinical.dataset2$OS_STATUS, pca.clinical$x[,1:20]) 
+colnames(componentMatrix)[1:3] <- c( "M_Stage", "N_Stage", "OS_Status")
+componentMatrix <- as.data.frame(componentMatrix)
+componentMatrix[,4:23] <- lapply(componentMatrix[,4:23], as.numeric) # Converting the matrix values of the PCs to be numeric 
+```
+
+#### Creating various plots to graphically represent the proportions of variance. 
+```{r}
+s <- summary(pca.clinical)
+
+#ggbiplot(pca.clinical)
+str(s)
+dev_std <- s$sdev
+var_pr <- dev_std^2
+var_pr[1:30]
+varex.propt <- var_pr/sum(var_pr)
+varex.propt[1:30]
+#scree plot
+plot(varex.propt, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b") #scree plot
+
+plot(cumsum(varex.propt), xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained", type = "b") #cumulative scree plot
+
+pca_data <- as.data.frame(pca.clinical$x)
+M_Stage <- factor(clinical.dataset2$PATH_M_STAGE)
+ggplot(pca_data, aes(x=PC1, y=PC2)) + geom_point(aes(colour=M_Stage)) # Scatter Plot 
+
+require(reshape2)
+dt <- as.data.frame(pca.clinical$x[,1:40])
+ggplot(data = melt(dt), aes(x = variable, y=value))+ geom_boxplot(aes(fill=variable), xlab = "PCs") # Boxplot Comparison 
+
+```
+First one has high variability suggesting significance. The further along the plot we go we can see that there is lower variance meaning there is little significance.
+
+#### Initializing the Train and Test datasets
+```{r}
+kirc.dataset.train <- componentMatrix[sample(nrow(componentMatrix))[1:(nrow(componentMatrix)/2)],]
+kirc.dataset.test <- componentMatrix[sample(nrow(componentMatrix))[(nrow(componentMatrix)/2):(nrow(componentMatrix))],]
+
+```
+
+#### Removing rows with MX from data to not skew prediction data
+```{r}
+kirc.dataset.test <- kirc.dataset.test[!(kirc.dataset.test$M_Stage=="MX"),]
+kirc.dataset.test <- kirc.dataset.test[!(is.na(kirc.dataset.test$M_Stage) | kirc.dataset.test$M_Stage==""), ]
+
+kirc.dataset.train <- kirc.dataset.train[!(kirc.dataset.train$M_Stage=="MX"),]
+kirc.dataset.train <- kirc.dataset.train[!(is.na(kirc.dataset.train$M_Stage) | kirc.dataset.train$M_Stage==""), ]
+```
+
+#### Creating logistic regression analysis
+```{r}
+glm.fit <- glm(as.factor(OS_Status) ~., data = kirc.dataset.train, family = binomial)
+summary(glm.fit)
+```
+
+#### Testing the accuracy, precision, and recall of the logistic Regression 
+```{r}
+library(caret)
+
+glm_pred_prob <- predict(glm.fit, kirc.dataset.test)
+glm_pred <- ifelse(glm_pred_prob > 0.5, "M1", "M0")
+d <- table(glm_pred, kirc.dataset.test$M_Stage) # Creating a table for the testing model
+d
+glm_pred_prob_train <- predict(glm.fit)
+glm_pred_train <- ifelse(glm_pred_prob_train > 0.5, "M1", "M0")
+table(glm_pred_train, kirc.dataset.train$M_Stage) # Creating a table for the training model
+
+confMat <- confusionMatrix(as.factor(glm_pred), as.factor(kirc.dataset.test$M_Stage), positive = "M1") # Creating a confusion matrix to test regression.
+confMat
+
+##Accuracy, Precision, and Recall defined by functions below for the Test set
+print(paste0("Accuracy for the Test set: ", confMat$overall['Accuracy']))
+
+```
+
+#### Creating a plot to represent the comparison between True and False Positive Rates of the M model 
+```{r}
+library(ROCR)
+
+componentMatrixMX <- componentMatrix[!(componentMatrix$M_Stage=="MX"),]
+componentMatrixMX <- componentMatrixMX[!(is.na(componentMatrixMX$M_Stage) | componentMatrixMX$M_Stage==""), ]
+
+pred.prob <- predict(glm.fit, componentMatrixMX, type="response")
+predict <- prediction(pred.prob, componentMatrixMX$M_Stage, label.ordering=c("M0","M1"))
+perform <- performance(predict,"tpr","fpr")
+plot(perform,colorize=TRUE)
+
+```
+
+The ROC curve for our metastasis prediction model tells us that our model demonstrates high separability of the data due to the sharp high AUROC, with an AUC near 0.95. The model has high discrimination capacity to distinguish between positive class and negative class.
+
+
+#### Creating a logistic regression model for the N Stage 
+```{r}
+## Reinitialize training and test data sets in case rows with MX that were deleted included a 
+## working N value
+
+kirc.dataset.train <- componentMatrix[sample(nrow(componentMatrix))[1:(nrow(componentMatrix)/2)],]
+kirc.dataset.test <- componentMatrix[sample(nrow(componentMatrix))[(nrow(componentMatrix)/2):(nrow(componentMatrix))],]
+
+#NX
+
+kirc.dataset.test <- kirc.dataset.test[!(kirc.dataset.test$N_Stage=="NX"),]
+kirc.dataset.test <- kirc.dataset.test[!(is.na(kirc.dataset.test$N_Stage) | kirc.dataset.test$N_Stage==""), ]
+
+kirc.dataset.train <- kirc.dataset.train[!(kirc.dataset.train$N_Stage=="NX"),]
+kirc.dataset.train <- kirc.dataset.train[!(is.na(kirc.dataset.train$N_Stage) | kirc.dataset.train$N_Stage==""), ]
+
+
+glm.fit <- glm(as.factor(OS_Status) ~., data = kirc.dataset.train, family = binomial)
+summary(glm.fit)
+```
+
+#### Creating confusion matrix to test the accuracy, precision, and recall of the N Stage model. 
+```{r}
+glm_pred_prob <- predict(glm.fit, kirc.dataset.test)
+glm_pred <- ifelse(glm_pred_prob > 0.5, "N1", "N0")
+d <- table(glm_pred, kirc.dataset.test$N_Stage)
+d
+glm_pred_prob_train <- predict(glm.fit)
+glm_pred_train <- ifelse(glm_pred_prob_train > 0.5, "N1", "N0")
+table(glm_pred_train, kirc.dataset.train$N_Stage)
+
+
+confMat2 <- confusionMatrix(as.factor(glm_pred), as.factor(kirc.dataset.test$N_Stage), positive = "N1")
+confMat2
+
+##Accuracy, Precision, and Recall defined by functions below for the Test set
+print(paste0("Accuracy for the Test set: ", confMat2$overall['Accuracy']))
+```
+
+#### Creating a plot to represent the comparison between True and False Positive Rates of the M model 
+```{r}
+
+componentMatrixNX <- componentMatrix[!(componentMatrix$N_Stage=="NX"),]
+componentMatrixNX <- componentMatrixNX[!(is.na(componentMatrixNX$N_Stage) | componentMatrixNX$N_Stage==""), ]
+
+pred.prob <- predict(glm.fit, componentMatrixNX, type="response")
+predict <- prediction(pred.prob, componentMatrixNX$N_Stage, label.ordering=c("N0","N1"))
+perform <- performance(predict,"tpr","fpr")
+plot(perform,colorize=TRUE)
+
+```
+
+The ROC curve for our regional lymph nodes tells us that our model demonstrates moderately low separability of the data due to the jagged AUROC. Since the AUC is much closer to a value in the range of 0.75, the model has relatively low discrimination capacity to distinguish between positive class and negative class.
+
+
+
+
